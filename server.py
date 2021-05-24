@@ -26,11 +26,11 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
 # Global metrics "registry"
-mBUTTON_PRESSES = Counter("button_presses", "Button Presses", ["pin"])
+mBUTTON_PRESSES = Counter("presses_total", "Button Presses", ["pin"])
 mSIGN_COUNT = Gauge("sign_count", "Attestation Sign Count", ["pin"])
 mAVAILABLE_DEVICES = Gauge("available_devices", "Number of available FIDO2 devices")
 mSIGN_LATENCY = Histogram("sign_latency", "Time Spent on Attestation")
-mSIGN_ERRORS = Counter("sign_errors", "Errors during Attestation")
+mSIGN_ERRORS = Counter("sign_error_total", "Errors during Attestation")
 
 
 def b64_object_hook(obj: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,7 +173,7 @@ class CredentialHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 @click.command()
-@click.option("--metrics", default=False, help="Enable Prometheus metrics")
+@click.option("--metrics", type=bool, default=False, help="Enable Prometheus metrics")
 @click.option("--metrics-port", type=int, default=21337)
 @click.option("--bind", type=str, default="0.0.0.0", help="IP Address to bind HTTP")
 @click.option("--port", type=int, default=1337, help="Port to bind HTTP")
