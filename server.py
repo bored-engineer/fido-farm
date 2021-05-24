@@ -173,7 +173,7 @@ class CredentialHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 @click.command()
-@click.option("--metrics", type=bool, default=False, help="Enable Prometheus metrics")
+@click.option("--metrics", is_flag=True, default=False, help="Enable Prometheus metrics")
 @click.option("--metrics-port", type=int, default=21337)
 @click.option("--bind", type=str, default="0.0.0.0", help="IP Address to bind HTTP")
 @click.option("--port", type=int, default=1337, help="Port to bind HTTP")
