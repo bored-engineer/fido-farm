@@ -1,8 +1,8 @@
-import binascii
 import json
 import logging
 import traceback
 from base64 import b64encode
+from binascii import Error as Base64Error
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -19,17 +19,25 @@ from fido2.ctap2 import Ctap2
 from fido2.hid import CtapHidDevice, open_device
 from fido2.utils import websafe_decode, websafe_encode
 from fido2.webauthn import PublicKeyCredentialCreationOptions
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from serial import Serial
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
+
+# Global metrics "registry"
+mBUTTON_PRESSES = Counter("button_presses", "Button Presses", ["pin"])
+mSIGN_COUNT = Gauge("sign_count", "Attestation Sign Count", ["pin"])
+mAVAILABLE_DEVICES = Gauge("available_devices", "Number of available FIDO2 devices")
+mSIGN_LATENCY = Histogram("sign_latency", "Time Spent on Attestation")
+mSIGN_ERRORS = Counter("sign_errors", "Errors during Attestation")
 
 
 def b64_object_hook(obj: Dict[str, Any]) -> Dict[str, Any]:
     """Replace specific keys that _may_ contain base64 data with the decoded value."""
     for key, value in obj.items():
         if key in {"id", "challenge"}:
-            with suppress(binascii.Error):
+            with suppress(Base64Error):
                 obj[key] = websafe_decode(value)
     return obj
 
@@ -45,6 +53,7 @@ class Device:
     def press(self, serial: Serial):
         """Trigger a button press."""
         serial.write(self.pin.to_bytes(1, "little"))
+        mBUTTON_PRESSES.labels(pin=self.pin).inc(1)
 
 
 class DeviceManager:
@@ -54,6 +63,7 @@ class DeviceManager:
 
     def __init__(self, devices: Iterable[Tuple[str, int]]):
         """Populates the internal device queue with provides devices."""
+        mAVAILABLE_DEVICES.set_function(lambda: self.queue.qsize())
         for device_path, pin in devices:
             device = open_device(device_path)
             self.queue.put(
@@ -75,7 +85,9 @@ class DeviceManager:
             raise Exception(f"no devices available after {timeout} seconds")
         # Yield devices and return it to the queue once the caller is done with it
         try:
-            yield device
+            with mSIGN_LATENCY.time():
+                with mSIGN_ERRORS.count_exceptions():
+                    yield device
         finally:
             self.queue.put(device)
 
@@ -87,36 +99,14 @@ class CredentialHTTPHandler(BaseHTTPRequestHandler):
     error_content_type = "text/plain"
     error_message_format = "%(explain)s"
 
-    def send_response(self, code, message=None):
-        super().send_response(code, message)
-        # Add some CORS headers to all responses
-        self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin", "*"))
-        self.send_header("Access-Control-Allow-Headers", "*")
-
-    def do_OPTIONS(self):
-        # Support CORS preflight requests
-        self.send_response(HTTPStatus.OK.value)
-        self.end_headers()
-
-    def do_GET(self):
-        # This shouldn't be used, but return something just in case
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Move Along, Nothing to See Here")
-
     def do_POST(self):
         # Read and parse the JSON method parameters from the POST body
         try:
             content_length: int = int(self.headers.get("Content-Length", 0))
-            options: Dict[str, Any] = json.loads(
-                self.rfile.read(content_length), object_hook=b64_object_hook
-            )
+            options: Dict[str, Any] = json.loads(self.rfile.read(content_length), object_hook=b64_object_hook)
         except json.JSONDecodeError:
             log.exception("failed to parse JSON body")
-            self.send_error(
-                HTTPStatus.BAD_REQUEST.value, explain=traceback.format_exc()
-            )
+            self.send_error(HTTPStatus.BAD_REQUEST.value, explain=traceback.format_exc())
             return
         # Catch _any_ errors and return/log them since this can break in lots of ways
         try:
@@ -144,10 +134,9 @@ class CredentialHTTPHandler(BaseHTTPRequestHandler):
                     event=timeout_event,
                     # When the device is waiting for a press, send one via serial
                     # TODO: _probably_ need to lock here, but it's a single byte so probably :fine:
-                    on_keepalive=lambda status: device.press(self.server.serial)
-                    if status == STATUS.UPNEEDED
-                    else None,
+                    on_keepalive=lambda status: device.press(self.server.serial) if status == STATUS.UPNEEDED else None,
                 )
+                mSIGN_COUNT.labels(pin=device.pin).set(attestation_object.auth_data.counter)
             # Encode the result as JSON
             self.send_response(HTTPStatus.OK.value)
             self.send_header("Content-Type", "application/json")
@@ -155,21 +144,15 @@ class CredentialHTTPHandler(BaseHTTPRequestHandler):
             self.wfile.write(
                 json.dumps(
                     {
-                        "id": b64encode(
-                            attestation_object.auth_data.credential_data.credential_id
-                        ).decode("ascii"),
+                        "id": b64encode(attestation_object.auth_data.credential_data.credential_id).decode("ascii"),
                         "client_data": str(client_data),
-                        "attestation_object": b64encode(
-                            bytes(attestation_object.with_string_keys())
-                        ).decode("ascii"),
+                        "attestation_object": b64encode(bytes(attestation_object.with_string_keys())).decode("ascii"),
                     }
                 ).encode("utf-8")
             )
         except Exception:
             log.exception("failed to make credential")
-            self.send_error(
-                HTTPStatus.INTERNAL_SERVER_ERROR.value, explain=traceback.format_exc()
-            )
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR.value, explain=traceback.format_exc())
             return
 
 
@@ -190,6 +173,8 @@ class CredentialHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 @click.command()
+@click.option("--metrics", default=False, help="Enable Prometheus metrics")
+@click.option("--metrics-port", type=int, default=21337)
 @click.option("--bind", type=str, default="0.0.0.0", help="IP Address to bind HTTP")
 @click.option("--port", type=int, default=1337, help="Port to bind HTTP")
 @click.option(
@@ -207,6 +192,9 @@ class CredentialHTTPServer(ThreadingMixIn, HTTPServer):
     help="hardcode HID devices/pin pairs",
 )
 def main(**kwargs):
+    metrics_port = kwargs.pop("metrics_port")
+    if kwargs.pop("metrics"):
+        start_http_server(metrics_port)
     server = CredentialHTTPServer(**kwargs)
     try:
         server.serve_forever()
