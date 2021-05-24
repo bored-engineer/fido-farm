@@ -23,7 +23,7 @@ void loop() {
   if (Serial.available() > 0) {
     byte pin = Serial.read();
     if (pin <= MAX_PIN) {
-      // The pin should be reset back to INPUT after 50 milliseconds
+      // The pin should be reset back to INPUT after 10 milliseconds
       pinMode(pin, OUTPUT);
       reset[pin] = current + 10;
     }
