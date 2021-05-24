@@ -1,5 +1,5 @@
 # fido-farm
-
+Blog post incoming, stay tuned...
 
 ### Demo
 Visit https://cloudflarechallenge.com/ and run the following in the developer tools console:
