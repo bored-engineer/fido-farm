@@ -1,7 +1,6 @@
 import binascii
 import json
 import logging
-import threading
 import traceback
 from base64 import b64encode
 from contextlib import contextmanager, suppress
@@ -11,13 +10,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Empty, Queue
 from socketserver import ThreadingMixIn
 from threading import Event, Timer
-from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
+from typing import Any, Dict, Generator, Iterable, Optional, Tuple
 
 import click
-from fido2.cbor import encode as cbor_encode
 from fido2.client import WEBAUTHN_TYPE, ClientData
 from fido2.ctap import STATUS
-from fido2.ctap2 import AttestationObject, Ctap2
+from fido2.ctap2 import Ctap2
 from fido2.hid import CtapHidDevice, open_device
 from fido2.utils import websafe_decode, websafe_encode
 from fido2.webauthn import PublicKeyCredentialCreationOptions
@@ -39,6 +37,7 @@ def b64_object_hook(obj: Dict[str, Any]) -> Dict[str, Any]:
 @dataclass
 class Device:
     """FIDO2 device that can be pressed automatically."""
+
     device: CtapHidDevice
     ctap2: Ctap2
     pin: int
@@ -57,16 +56,16 @@ class DeviceManager:
         """Populates the internal device queue with provides devices."""
         for device_path, pin in devices:
             device = open_device(device_path)
-            self.queue.put(Device(
-                device=device,
-                ctap2=Ctap2(device),
-                pin=pin,
-            ))
+            self.queue.put(
+                Device(
+                    device=device,
+                    ctap2=Ctap2(device),
+                    pin=pin,
+                )
+            )
 
     @contextmanager
-    def checkout(
-        self, timeout: Optional[int] = 10
-    ) -> Generator[None, None, Ctap2]:
+    def checkout(self, timeout: Optional[int] = 10) -> Generator[None, None, Ctap2]:
         """Yields a devices from the internal queue, blocking until it's available as needed."""
         try:
             # Try to checkout a device
@@ -79,6 +78,7 @@ class DeviceManager:
             yield device
         finally:
             self.queue.put(device)
+
 
 class CredentialHTTPHandler(BaseHTTPRequestHandler):
     """Handle HTTP request to use a method on a Device."""
@@ -144,17 +144,27 @@ class CredentialHTTPHandler(BaseHTTPRequestHandler):
                     event=timeout_event,
                     # When the device is waiting for a press, send one via serial
                     # TODO: _probably_ need to lock here, but it's a single byte so probably :fine:
-                    on_keepalive=lambda status: device.press(self.server.serial) if status == STATUS.UPNEEDED else None,
+                    on_keepalive=lambda status: device.press(self.server.serial)
+                    if status == STATUS.UPNEEDED
+                    else None,
                 )
             # Encode the result as JSON
             self.send_response(HTTPStatus.OK.value)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({
-                "id": b64encode(attestation_object.auth_data.credential_data.credential_id).decode('ascii'),
-                "client_data": str(client_data),
-                "attestation_object": b64encode(bytes(attestation_object.with_string_keys())).decode('ascii'),
-            }).encode("utf-8"))
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "id": b64encode(
+                            attestation_object.auth_data.credential_data.credential_id
+                        ).decode("ascii"),
+                        "client_data": str(client_data),
+                        "attestation_object": b64encode(
+                            bytes(attestation_object.with_string_keys())
+                        ).decode("ascii"),
+                    }
+                ).encode("utf-8")
+            )
         except Exception:
             log.exception("failed to make credential")
             self.send_error(
@@ -166,18 +176,36 @@ class CredentialHTTPHandler(BaseHTTPRequestHandler):
 class CredentialHTTPServer(ThreadingMixIn, HTTPServer):
     """Extends http.server.HTTPServer with each socket handled in a thread and a global device manager instance."""
 
-    def __init__(self, serial: str, baud: int, devices: Iterable[Tuple[str, int]], bind: str, port:int):
+    def __init__(
+        self,
+        serial: str,
+        baud: int,
+        devices: Iterable[Tuple[str, int]],
+        bind: str,
+        port: int,
+    ):
         self.devices = DeviceManager(devices)
         self.serial = Serial(port=serial, baudrate=baud, timeout=1)
         super().__init__((bind, port), CredentialHTTPHandler)
 
 
 @click.command()
-@click.option('--bind', type=str, default="0.0.0.0", help='IP Address to bind HTTP')
-@click.option('--port', type=int, default=1337, help='Port to bind HTTP')
-@click.option('--serial', type=click.Path(readable=False), default='/dev/ttyACM0', help='Port to connect via serial')
-@click.option('--baud', type=int, default=115200, help='Baud rate for serial')
-@click.option('--device', 'devices', type=(click.Path(readable=False), int), multiple=True, help='hardcode HID devices/pin pairs')
+@click.option("--bind", type=str, default="0.0.0.0", help="IP Address to bind HTTP")
+@click.option("--port", type=int, default=1337, help="Port to bind HTTP")
+@click.option(
+    "--serial",
+    type=click.Path(readable=False),
+    default="/dev/ttyACM0",
+    help="Port to connect via serial",
+)
+@click.option("--baud", type=int, default=115200, help="Baud rate for serial")
+@click.option(
+    "--device",
+    "devices",
+    type=(click.Path(readable=False), int),
+    multiple=True,
+    help="hardcode HID devices/pin pairs",
+)
 def main(**kwargs):
     server = CredentialHTTPServer(**kwargs)
     try:
@@ -186,5 +214,6 @@ def main(**kwargs):
         pass
     server.server_close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
